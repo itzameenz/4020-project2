@@ -1,0 +1,8 @@
+| statistic                                | value   |
+|:-----------------------------------------|:--------|
+| isomer pairs measured on the same target | 952     |
+| mean absolute difference                 | 0.441   |
+| median absolute difference               | 0.301   |
+| identical scores (difference < 1e-6)     | 24.1%   |
+| pairs differing by > 1.0                 | 86      |
+| Pearson r between isomers                | 0.857   |

@@ -1,0 +1,3 @@
+entity,pairs (≥10 shared),"Spearman ρ(sim, r)","median r, bottom-50% similarity","median r, top-5% similarity"
+ligand,"842,004",0.072,0.12,0.297
+target,"17,096",0.213,0.229,0.539

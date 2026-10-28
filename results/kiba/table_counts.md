@@ -1,0 +1,9 @@
+|                                    | original   | cleaned (deduplicated)   |
+|:-----------------------------------|:-----------|:-------------------------|
+| ligands                            | 2111       | 2068                     |
+| targets                            | 229        | 229                      |
+| observed pairs                     | 118,254    | 117,657                  |
+| matrix positions                   | 483,419    | 473,572                  |
+| sparsity (missing / all positions) | 75.54%     | 75.16%                   |
+| mean observations per ligand       | 56.0       | 56.9                     |
+| mean observations per target       | 516.4      | 513.8                    |

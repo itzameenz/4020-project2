@@ -1,0 +1,6 @@
+flag,rule,rows,% of rows,action,interpretation
+flag_zero,score == 0,1,0.00%,kept,"The only zero score in KIBA. Valid on the supplied scale, so kept (brief: keep valid zero scores)."
+flag_far_low,score < Q1 − 3·IQR (9.03),20,0.02%,kept,"Extremely weak scores, far below the bulk of the data. Most belong to one ligand."
+flag_low_ligand,> 50 % of a ligand's scores are far-low,11,0.01%,kept,A ligand-level anomaly: CHEMBL373751's 11 scores average 3.3 vs a dataset mean of 11.7; likely an artefact of the score transformation of its source data.
+flag_spike,score exactly 11.1 or 11.2,26922,22.88%,kept,"Heaped values (KIBA's most frequent scores), consistent with rounded / thresholded source measurements — a screening-floor effect."
+flag_far_high,score > Q3 + 3·IQR (14.10),2934,2.49%,kept,Very strong binders. These are genuine and the most interesting records; kept.

@@ -1,0 +1,5 @@
+explained by,R² (share of score variance)
+ligand identity only,41.7%
+target identity only,14.1%
+ligand + target (additive),51.9%
+residual (ligand × target interaction + noise),48.1%
