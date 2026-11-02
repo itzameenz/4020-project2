@@ -1,0 +1,4 @@
+model,sim,shrink,min_common,keep_negative,k,rank,lam,sweeps,val MSE
+Ligand-based CF,pearson,50.0,2.0,False,8.0,,,,0.22148970714257066
+Target-based CF,pearson,25.0,10.0,False,5.0,,,,0.2541058518701962
+Matrix factorisation,,,,,,64.0,0.025,41.0,0.1911700307407974
