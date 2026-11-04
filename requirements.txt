@@ -5,3 +5,8 @@ matplotlib==3.11.2
 tabulate==0.10.0
 ipykernel==7.4.0
 nbconvert==7.17.2
+jupytext==1.19.6
+rdkit==2026.9.1
+scikit-learn==1.9.1
+torch==2.15.0+cpu
+transformers==5.22.1

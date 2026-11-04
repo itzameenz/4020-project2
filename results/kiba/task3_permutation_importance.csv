@@ -1,0 +1,6 @@
+feature group,HGB 3-mer: seq + lig + fp,HGB 3-mer + sim-neighbour
+"3-mer profile (+AA, len)",0.024107099228186702,0.007665630560367731
+ligand mean,0.36410347591139375,0.012326446752199405
+fingerprint,0.024546021562569666,0.012515073198101667
+sim-neighbour prediction,,0.5774021720454163
+max similarity,,-0.017338074393456714

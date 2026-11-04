@@ -1,0 +1,7 @@
+seed,train rows,val rows,test rows,train / val / test targets,group in >1 part,sequence in >1 part,held-out ligands not in train
+42,82348,14133,21176,160/27/42,False,False,0
+0,81625,18187,17845,161/32/36,False,False,0
+1,82069,16058,19530,147/38/44,False,False,0
+2,81260,18390,18007,161/33/35,False,False,0
+3,81819,17794,18044,162/34/33,False,False,0
+4,77822,21904,17931,147/46/36,False,False,0

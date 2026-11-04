@@ -3,6 +3,7 @@
 | Task | Scope | Status |
 |---|---|---|
 | **1 — Dataset analysis** | **KIBA** | ✅ complete (this page) |
+| **3 — Cold-target generalisation** | **KIBA** | ✅ complete ([below](#task-3--cold-target-generalisation-on-kiba)) |
 
 ---
 
@@ -251,6 +252,68 @@ A two-way additive decomposition (score ≈ overall mean + ligand effect + targe
 
 ---
 
+# Task 3 — Cold-target generalisation on KIBA
+
+**Notebook:** [`notebooks/task3_kiba.ipynb`](notebooks/task3_kiba.ipynb) · **Figures:** `figures/kiba/task3_*.png` · **Tables:** `results/kiba/task3_*` · **Notes for the group:** [`results/kiba/task3_kiba_notes.pdf`](results/kiba/task3_kiba_notes.pdf)
+
+**Question.** For a kinase never seen in training, how well can we predict each ligand's KIBA score from the target's sequence (plus ligand information)? Every test target is unseen, so no target-ID or target-mean features are used. The setup follows the group's shared Task 3 plan, which was written for DAVIS, so the two datasets can be compared.
+
+### Key findings at a glance
+
+- **The ligand mean is a strong baseline** (test MSE **0.433**, against 0.662 for the global mean): most KIBA variance lies between ligands.
+- **Gradient boosting on 3-mer or ESM sequence features only matches it** (0.427–0.433; beats the baseline on 2–4 of 5 splits). Each split has only ~160 training kinases, too few to learn sequence → affinity.
+- **A similarity-neighbour predictor beats the baseline on all 5 splits** (**0.388**, CI 0.734 vs 0.699). It averages the ligand's own training scores, weighted by sequence similarity to the new kinase, and needs no training. Added as a feature to boosting, it gives 0.386 (5 of 5).
+- **The gain comes from kinases with a relative in training**: error drops 18–24 % in the upper three similarity quartiles and only ~2 % in the least-similar one.
+
+## 1. Setup
+
+| Item | Setting |
+|---|---|
+| Data | Task 1 cleaned table: 2,068 ligands × 229 targets, 117,657 observed pairs; only observed pairs used |
+| Groups | Targets clustered on the supplied Smith–Waterman matrix (average linkage, similarity > 0.5) → 150 groups, largest 8 |
+| Split | Groups shuffled; cumulative row share ≤ 0.70 train, ≤ 0.85 validation, rest test. Seed 42 main run, seeds 0–4 repeats. No group or sequence crosses partitions ([checks](results/kiba/task3_split_checks.md)) |
+| Sequence features | 3-mer frequencies (vocabulary from training sequences only) → TruncatedSVD 24, + 20 amino-acid fractions + log length; or ESM-2 (`facebook/esm2_t6_8M_UR50D`, mean-pooled, 1,000-residue chunks) → PCA 24 |
+| Ligand features | Mean score over training targets (leaving out the row's own group for training rows); Morgan fingerprint (RDKit, r = 2, 1,024 count bits) → SVD 16 |
+| Model | `HistGradientBoostingRegressor` (min_samples_leaf 40, no early stopping); depth {3, 5} × (lr, iterations) {(0.05, 300), (0.1, 150)}, chosen on validation MSE |
+| Similarity-neighbour | Prediction = Σ s(t, t′)<sup>q</sup> y(l, t′) / Σ s(t, t′)<sup>q</sup> over the ligand's training targets t′; *q* chosen on validation; own-group targets excluded for training rows |
+| Metrics | MSE; CI = (C + 0.5 T) / A on ≤ 20,000 test pairs (fixed seed); CI on pairs with both scores > 11.2 (above the heaped 11.1 / 11.2 values); Hit@1 / Hit@5 for ligands with ≥ 5 held-out targets |
+
+## 2. Results (test set, 5 cold splits, mean ± std)
+
+| Model | MSE train | MSE test | CI | CI > 11.2 | Hit@1 | Hit@5 | Beats baseline |
+|---|---:|---:|---:|---:|---:|---:|:--:|
+| Global mean | 0.706 | 0.662 ± 0.069 | 0.500 | 0.500 | 0.104 | 0.449 | 0 of 5 |
+| **Ligand-mean baseline** | 0.397 | **0.433 ± 0.056** | 0.699 | 0.656 | 0.104 | 0.449 | — |
+| HGB 3-mer: seq only | 0.610 | 0.667 ± 0.086 | 0.552 | 0.565 | 0.152 | 0.534 | 0 of 5 |
+| HGB 3-mer: seq + lig mean | 0.347 | 0.439 ± 0.056 | 0.696 | 0.662 | 0.154 | 0.506 | 1 of 5 |
+| HGB 3-mer: seq + lig + fp | 0.281 | 0.433 ± 0.055 | 0.698 | 0.662 | 0.172 | 0.498 | 3 of 5 |
+| HGB ESM: seq + lig + fp | 0.281 | 0.427 ± 0.049 | 0.694 | 0.649 | 0.154 | 0.498 | 2 of 5 |
+| HGB ESM + 3-mer: seq + lig + fp | 0.282 | 0.427 ± 0.053 | 0.700 | 0.656 | 0.163 | 0.515 | 4 of 5 |
+| **Similarity-neighbour** | 0.355 | **0.388 ± 0.044** | **0.734** | **0.694** | 0.198 | **0.601** | **5 of 5** |
+| **HGB 3-mer + similarity-neighbour** | 0.247 | **0.386 ± 0.042** | 0.728 | 0.691 | **0.204** | 0.582 | **5 of 5** |
+
+Full tables: [summary](results/kiba/task3_summary.md) · [paired vs baseline](results/kiba/task3_paired_vs_baseline.md) · [all seeds](results/kiba/task3_all_seeds.md) · [SVD sweep](results/kiba/task3_svd_sweep.md). "Beats baseline" counts the splits on which test MSE is lower than the ligand mean. The splits share data, so this is descriptive, not a significance test.
+
+![Test MSE by seed](figures/kiba/task3_fig1_test_mse_by_seed.png)
+
+## 3. Analysis
+
+![Error vs similarity](figures/kiba/task3_fig2_error_vs_similarity.png)
+
+- **Error vs similarity (seed 42).** Test rows are binned by the 3-mer cosine similarity of their target to the nearest training target. The neighbour models gain 18–24 % over the baseline in the upper three quartiles, and only ~2 % in the least-similar one. Cold-target prediction on KIBA works by transfer from related kinases.
+- **Permutation importance (validation, [table](results/kiba/task3_permutation_importance.md)).** In the plan's model the ligand mean dominates (0.36 vs 0.02 for the 3-mer profile and 0.02 for the fingerprint), as on DAVIS. With the neighbour feature added, that feature takes over (0.58).
+- **ESM vs 3-mers ([table](results/kiba/task3_esm_vs_kmer.md)).** Nearly identical; ESM is better on 2 of 5 splits. Mean-pooled ESM-2 8M mostly encodes "kinase", which every target is.
+- **SVD size.** Validation MSE moves from 0.52 (8–24 dims) to 0.50 (48–100 dims), small next to the split-to-split spread (std ≈ 0.07), so 24 is kept for comparability with DAVIS.
+
+## 4. Limitations
+
+- Similarity clusters at 0.5 still let distant paralogues sit on both sides of a split; large groups decide which targets land in test; the five splits are not independent.
+- KIBA is 75 % missing, and its scores are a constructed consensus with heaped values at 11.1 / 11.2. Hit@k has a high chance level (random Hit@5 ≈ 0.45), because held-out ligands often have only 5–10 targets.
+- The Smith–Waterman matrix comes with the data and uses sequences only (no labels), so using it for unseen targets is legitimate.
+- These cold-target numbers are **not** comparable with DeepDTA's random-split results (MSE 0.194, CI 0.863).
+
+---
+
 ## Reproduce
 
 ```bash
@@ -258,9 +321,10 @@ python -m venv .venv
 # Windows: .venv\Scripts\activate   |   macOS/Linux: source .venv/bin/activate
 pip install -r requirements.txt
 jupyter nbconvert --to notebook --execute --inplace notebooks/task1_kiba.ipynb
+jupyter nbconvert --to notebook --execute --inplace --ExecutePreprocessor.timeout=1800 notebooks/task3_kiba.ipynb
 ```
 
-Every number, table and figure on this page is regenerated by that one notebook. The run takes under a minute.
+Every number, table and figure on this page is regenerated by these two notebooks. Task 1 runs in under a minute. Task 3 takes about 13 minutes on a laptop CPU; the first run also downloads the ESM-2 model (30 MB) and caches the embeddings in `data/processed/kiba_esm2_t6_8M.npy`.
 
 ## Repository structure
 
@@ -270,6 +334,7 @@ data/
   processed/           cleaned KIBA tables (output of the notebook)
 notebooks/
   task1_kiba.ipynb     Task 1 — KIBA analysis
+  task3_kiba.ipynb     Task 3 — KIBA cold-target generalisation (source: task3_kiba.py, jupytext)
 figures/kiba/          all KIBA figures (PNG)
 results/kiba/          all KIBA tables (CSV + Markdown)
 ```
@@ -281,3 +346,5 @@ results/kiba/          all KIBA tables (CSV + Markdown)
 3. He, T., Heidemeyer, M., Ban, F., Cherkasov, A., & Ester, M. (2017). SimBoost: a read-across approach for predicting drug–target binding affinities using gradient boosting machines. *J. Cheminformatics*, 9, 24.
 4. Kim, Y., et al. (2025). MixingDTA: improved drug–target affinity prediction by extending mixup with guilt-by-association. *Bioinformatics*, 41(Supplement_1), i105–i114.
 5. Tukey, J. W. (1977). *Exploratory Data Analysis*. Addison-Wesley.
+6. Lin, Z., Akin, H., Rao, R., et al. (2023). Evolutionary-scale prediction of atomic-level protein structure with a language model. *Science*, 379(6637), 1123–1130. (ESM-2)
+7. RDKit: Open-source cheminformatics. <https://www.rdkit.org>
