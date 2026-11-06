@@ -22,8 +22,8 @@
 # **[KIBA]**, and one extra model (a similarity-weighted neighbour predictor) is marked **[new]**.
 #
 # **Outputs**
-# - `results/kiba/task3_*.csv|md`: every table shown below
-# - `figures/kiba/task3_*.png`: every figure shown below
+# - `results/kiba/task3/`: every table shown below
+# - `figures/kiba/task3/`: every figure shown below
 # - `data/processed/kiba_esm2_t6_8M.npy`: cached ESM-2 embeddings (229 × 320)
 
 # %%
@@ -50,8 +50,8 @@ os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
 ROOT = Path.cwd().parent if Path.cwd().name == "notebooks" else Path.cwd()
 RAW = ROOT / "data" / "kiba"
 OUT = ROOT / "data" / "processed"
-FIG = ROOT / "figures" / "kiba"
-RES = ROOT / "results" / "kiba"
+FIG = ROOT / "figures" / "kiba" / "task3"
+RES = ROOT / "results" / "kiba" / "task3"
 for p in (FIG, RES):
     p.mkdir(parents=True, exist_ok=True)
 
@@ -165,7 +165,7 @@ def split_checks(frame, part):
 
 checks = pd.DataFrame({s: split_checks(frame, cold_split(frame, s)) for s in [MAIN_SEED] + SEEDS}).T
 checks.index.name = "seed"
-save_table(checks.reset_index(), "task3_split_checks")
+save_table(checks.reset_index(), "split_checks")
 
 # %% [markdown]
 # No group and no sequence crosses partitions in any split, and every held-out ligand has at least one
@@ -181,9 +181,16 @@ save_table(checks.reset_index(), "task3_split_checks")
 #   the set is larger.
 # - **CI > 11.2 [KIBA]**: CI restricted to pairs whose true scores are both above the heaped 11.1/11.2
 #   values. This replaces DAVIS's "CI on pKd > 5".
+# - **CI within ligand [new]**: the same CI, but only over pairs of targets belonging to the *same*
+#   ligand. This is the metric the brief's Task 3 objective actually describes — whether a method can
+#   "distinguish between different new targets" for a given drug. The overall CI also rewards getting
+#   the ordering right *across* ligands, which the ligand mean already does, so it hides the failure.
+#   A predictor that is constant per ligand scores exactly 0.5 here, by construction.
 # - **Hit@k**: for each ligand with ≥ 5 held-out observed targets, whether a truly best held-out target
 #   is in the predicted top k. Prediction ties are broken at random. Ligands whose held-out scores are
 #   all equal are skipped, because every ranking would hit.
+# - **MRR**: mean reciprocal rank of the first truly best held-out target, over the same ligands
+#   (reported because the Task 2 reference output includes it).
 
 # %%
 def ci(y, p, chunk=1500):                              # concordance index, ties in prediction count half
@@ -206,10 +213,25 @@ def ci_sub(y, p, seed=0):
     return ci(y, p)
 
 
+def ci_within(lig, y, p):              # CI over pairs of targets of the SAME ligand
+    d = pd.DataFrame({"lig": lig, "y": np.asarray(y, float), "p": np.asarray(p, float)})
+    good = tot = 0.0
+    for _, g in d.groupby("lig", sort=False):
+        if len(g) < 2 or g.y.nunique() == 1:
+            continue
+        yy, pp = g.y.to_numpy(), g.p.to_numpy()
+        m = (yy[:, None] - yy[None, :]) > 0
+        dp = pp[:, None] - pp[None, :]
+        tot += m.sum()
+        good += (dp[m] > 0).sum() + 0.5 * (dp[m] == 0).sum()
+    return good / tot if tot else np.nan
+
+
 def hit_at_k(lig, y, p, ks=(1, 5), seed=0):
     rng = np.random.default_rng(seed)
     d = pd.DataFrame({"lig": lig, "y": y, "p": p, "r": rng.random(len(y))})
     hits = {k: [] for k in ks}
+    rr = []
     for _, g in d.groupby("lig", sort=False):
         if len(g) < HIT_MIN or g.y.nunique() == 1:
             continue
@@ -217,7 +239,10 @@ def hit_at_k(lig, y, p, ks=(1, 5), seed=0):
         best = (g.y.to_numpy() == g.y.max())[order]
         for k in ks:
             hits[k].append(best[:k].any())
-    return {f"hit@{k}": float(np.mean(v)) for k, v in hits.items()}
+        rr.append(1.0 / (int(np.argmax(best)) + 1))
+    out = {f"hit@{k}": float(np.mean(v)) for k, v in hits.items()}
+    out["mrr"] = float(np.mean(rr))
+    return out
 
 
 def evaluate(fr, part, pred):
@@ -225,6 +250,7 @@ def evaluate(fr, part, pred):
     te = part == "test"
     y, p = fr.y.to_numpy()[te], pred[te]
     out["ci_test"] = ci_sub(y, p)
+    out["ci_within"] = ci_within(fr.ligand_id.to_numpy()[te], y, p)
     hi = y > FLOOR + 1e-9
     out["ci_test_gt11.2"] = ci_sub(y[hi], p[hi])
     out.update(hit_at_k(fr.ligand_id.to_numpy()[te], y, p))
@@ -380,6 +406,24 @@ def build_features(fr, part):
 
 
 # %% [markdown]
+# ### Why the ligand mean is exactly the CF fallback
+#
+# The Task 3 objective in the brief is set up against Task 2's collaborative filtering: *"If a new target
+# has no recorded scores, even if its ID is included in the model, the prediction falls back to the
+# ligand's mean training score and cannot distinguish between different new targets."*
+#
+# That is not an assumption, it follows from the model. Biased matrix factorisation predicts
+#
+# > r̂(i, j) = μ + b_i + c_j + u_i · v_j
+#
+# with μ the global mean, b_i the drug bias, c_j the target bias and u_i, v_j the latent factors. For a
+# target j that never appears in training, c_j and v_j receive no gradient and keep their initial values
+# (zero, or the prior mean), so the prediction collapses to μ + b_i — a constant for the drug, identical
+# for *every* unseen target. So our **ligand-mean baseline is precisely what the Task 2 CF degrades to on
+# cold targets**, not a weak strawman. It is also why its within-ligand CI is exactly 0.5: it produces a
+# flat ranking. Any method that scores above 0.5 there has genuinely solved the problem the brief poses.
+
+# %% [markdown]
 # ## 5. Models
 #
 # | Model | Inputs |
@@ -472,7 +516,7 @@ def run_split(seed, keep=False):
 t0 = time.time()
 res42, main = run_split(MAIN_SEED, keep=True)
 print(f"seed {MAIN_SEED}: {time.time() - t0:.0f} s")
-save_table(res42.drop(columns="seed"), "task3_main_seed42")
+save_table(res42.drop(columns="seed"), "main_seed42")
 
 # %% [markdown]
 # **SVD size.** Following the DAVIS plan, we sweep the 3-mer SVD size on **validation** only
@@ -495,7 +539,7 @@ def svd_sweep(seed, dims=(8, 16, 24, 48, 100)):
     return pd.DataFrame(out)
 
 
-sweep = save_table(svd_sweep(MAIN_SEED), "task3_svd_sweep")
+sweep = save_table(svd_sweep(MAIN_SEED), "svd_sweep")
 sweep
 
 # %% [markdown]
@@ -509,14 +553,14 @@ sweep
 t0 = time.time()
 res = pd.concat([run_split(s) for s in SEEDS], ignore_index=True)
 print(f"5 seeds: {time.time() - t0:.0f} s")
-save_table(res, "task3_all_seeds")
+save_table(res, "all_seeds")
 
-metric_cols = ["mse_train", "mse_val", "mse_test", "ci_test", "ci_test_gt11.2", "hit@1", "hit@5"]
+metric_cols = ["mse_train", "mse_val", "mse_test", "ci_test", "ci_within", "ci_test_gt11.2", "hit@1", "hit@5", "mrr"]
 order = list(res.model.drop_duplicates())
 agg = res.groupby("model", sort=False)[metric_cols].agg(["mean", "std"])
 summary = pd.DataFrame({c: agg[(c, "mean")].map("{:.3f}".format) + " ± " + agg[(c, "std")].map("{:.3f}".format) for c in metric_cols})
 summary = summary.loc[order].reset_index()
-save_table(summary, "task3_summary")
+save_table(summary, "summary")
 
 # %% [markdown]
 # **Paired comparison with the baseline.** For each seed: model test MSE minus baseline test MSE
@@ -532,24 +576,33 @@ paired = pd.DataFrame({
     "mean Δ": diff.mean().to_numpy(),
     "beats baseline": [f"{(diff[c] < 0).sum()} of {len(SEEDS)}" for c in diff.columns],
 })
-save_table(paired, "task3_paired_vs_baseline")
+save_table(paired, "paired_vs_baseline")
 
 # %% [markdown]
-# **Reading the tables.**
-# - The **ligand mean is a strong baseline on KIBA** (test MSE 0.433 against 0.662 for the global mean).
+# **Reading the tables.** The choice of metric decides the verdict here, so the two must be read together.
+#
+# - **On MSE the ligand mean is a strong baseline** (test 0.433 against 0.662 for the global mean).
 #   KIBA's variance is mostly between ligands: in Task 1, ligand means explained 42 % of it and target
-#   means 14 %.
-# - **Sequence models from the shared plan add almost nothing.** The best of them ("3-mer: seq + lig + fp",
-#   "ESM", "ESM + 3-mer") change test MSE by −0.006 to 0.000 on average, beat the baseline on 2–4 of 5
-#   splits, and have the same CI. On sequence alone (no ligand features) the model is no better than the
-#   global mean. The train/validation gap (0.28 vs 0.44) shows the boosted models fit the seen targets but
-#   do not transfer.
-# - **The similarity-neighbour predictor beats the baseline on all 5 splits** (mean ΔMSE −0.045, CI
-#   0.734 vs 0.699, Hit@1 0.198 vs 0.104), with no learning at all. Adding it to the boosting model gives
-#   the lowest MSE (0.386, 5 of 5), but almost all of that comes from the neighbour feature itself.
-# - **Hit@k on KIBA has a high chance level.** Held-out ligands have few observed targets per split (often 5–10),
-#   so random ranking already reaches Hit@5 ≈ 0.45. The ligand-mean baseline ranks every target of a ligand
-#   equally, so it equals random here.
+#   means 14 %. Predicting each ligand's level therefore gets you most of the squared error.
+# - **But the baseline is blind to the question Task 3 actually asks.** Its within-ligand CI is
+#   **exactly 0.500 on every one of the 5 seeds** (std 0.000), the same as the global mean's, and its
+#   Hit@1 and Hit@5 are identical to the global mean's too. It assigns one number to a ligand and
+#   repeats it for every unseen kinase, so it cannot rank them at all. This is the brief's
+#   "cannot distinguish between different new targets", measured rather than assumed, and it confirms
+#   the algebra above.
+# - **The sequence models do distinguish new targets, even though their MSE does not improve.**
+#   Within-ligand CI 0.536–0.559 against the baseline's 0.500, Hit@1 0.152–0.172 against 0.104, while
+#   test MSE stays level at 0.427–0.439. Judged on MSE alone they look pointless; judged on the
+#   criterion the brief sets, they are not. Even "seq only", the weakest model by MSE (0.667), reaches
+#   a within-ligand CI of 0.555 using **no ligand information whatsoever** — the sequence alone carries
+#   real ranking signal. MSE hides this because it is dominated by each ligand's level, which the
+#   ligand mean already supplies.
+# - **The similarity-neighbour predictor is the best on both counts**: test MSE 0.388 (beats the
+#   baseline on 5 of 5 splits) and within-ligand CI 0.601, with no learning at all. Adding it to the
+#   boosting model matches it (0.386 MSE, 0.601 CI), so almost all of the gain is the neighbour feature.
+# - **Hit@k on KIBA has a high chance level.** Held-out ligands have few observed targets per split
+#   (often 5–10), so random ranking already reaches Hit@5 ≈ 0.45. Treat Hit@k as noisy and read the
+#   within-ligand CI, which uses every pair, as the primary ranking metric.
 
 # %%
 fig, ax = plt.subplots(figsize=(9, 4.2))
@@ -564,7 +617,7 @@ ax.set_yticks(range(len(show)), show)
 ax.invert_yaxis()
 ax.set_xlabel("test MSE (dots: seeds 0–4, bar: mean)")
 ax.set_title("Cold-target test MSE on KIBA, 5 group splits", loc="left")
-savefig(fig, "task3_fig1_test_mse_by_seed")
+savefig(fig, "fig1_test_mse_by_seed")
 
 # %% [markdown]
 # ## 8. Analysis (main split, seed 42)
@@ -583,7 +636,7 @@ for m in cmp_models:
 bins = ft.groupby("bin", observed=True).agg(targets=("target_id", "nunique"), rows=("y", "size"), **{m: (m, "mean") for m in cmp_models})
 bins.index = [f"{iv.left:.2f}–{iv.right:.2f}" for iv in bins.index]
 bins.index.name = "nearest-train 3-mer cosine"
-save_table(bins.reset_index(), "task3_error_vs_similarity")
+save_table(bins.reset_index(), "error_vs_similarity")
 
 fig, ax = plt.subplots(figsize=(8, 4))
 x = np.arange(len(bins))
@@ -595,7 +648,7 @@ ax.set_xlabel("cosine similarity of test target to nearest training target (quar
 ax.set_ylabel("test MSE")
 ax.set_title("Error by similarity to the training targets (seed 42)", loc="left")
 ax.legend(fontsize=8, ncol=4, loc="upper center", bbox_to_anchor=(0.5, -0.2))
-savefig(fig, "task3_fig2_error_vs_similarity")
+savefig(fig, "fig2_error_vs_similarity")
 
 # %% [markdown]
 # **(ii) Permutation importance of feature groups (validation).** The columns of one group are shuffled
@@ -627,7 +680,7 @@ LABEL = {"seq3": "3-mer profile (+AA, len)", "ligmean": "ligand mean", "fp": "fi
 imp = pd.DataFrame({n: group_importance(n) for n in ["HGB 3-mer: seq + lig + fp", "HGB 3-mer + sim-neighbour"]})
 imp.index = [LABEL[i] for i in imp.index]
 imp.index.name = "feature group"
-save_table(imp.reset_index(), "task3_permutation_importance")
+save_table(imp.reset_index(), "permutation_importance")
 
 # %% [markdown]
 # **(iii) ESM versus 3-mers, per seed.**
@@ -642,12 +695,20 @@ if ESM is not None:
     })
     e["ESM − 3-mer"] = e["ESM"] - e["3-mer"]
     print(f"ESM beats 3-mer on {(e['ESM − 3-mer'] < 0).sum()} of {len(e)} seeds")
-    save_table(e, "task3_esm_vs_kmer")
+    save_table(e, "esm_vs_kmer")
 
 
 # %% [markdown]
 # ## 9. Interpretation
 #
+# - **The headline result.** On cold targets the Task 2 fallback has a within-ligand CI of exactly
+#   0.500: for a given drug it ranks unseen kinases no better than tossing a coin. Every method here
+#   that uses the target's sequence beats that — 0.536 to 0.559 for the boosted sequence models, and
+#   0.601 for the similarity-neighbour predictor. The cold-target problem the brief poses is real, and
+#   sequence information solves part of it.
+# - **MSE and ranking disagree, and both belong in the report.** The sequence models are level with the
+#   baseline on MSE but clearly ahead of it on ranking; the neighbour model is ahead on both. Reporting
+#   only MSE would wrongly conclude that sequence features are useless for cold targets.
 # - **Where the gain comes from.** Fig. 2 shows that the neighbour models gain where a test kinase has a
 #   relative in training: in the middle and top similarity quartiles their error is 15–25 % below the
 #   baseline. In the least-similar quartile the gain shrinks to about 2 %. Cold-target prediction on
@@ -658,10 +719,12 @@ if ESM is not None:
 #   already contains the ligand's level, adjusted towards its scores on related kinases.
 # - **ESM vs 3-mers.** Test MSE is nearly identical (ESM better on 2 of 5 splits). Mean-pooled ESM-2 8M
 #   embeddings do not help here. The global protein embedding mostly encodes "kinase", which all targets are.
-# - **Why KIBA differs from DAVIS.** On DAVIS the learned models beat the ligand mean on 5 of 5 splits.
-#   KIBA has 30× more ligands but only 229 targets, all wild-type, so the boosting model sees about 160
-#   training targets per split to learn a sequence → affinity map. Each ligand has, however, many observed
-#   training targets, which is exactly what the neighbour predictor exploits.
+# - **Why KIBA differs from DAVIS.** On DAVIS the learned models beat the ligand mean on MSE on 5 of 5
+#   splits; on KIBA they do not. KIBA has 30× more ligands but only 229 targets, all wild-type, so the
+#   boosting model sees about 160 training targets per split from which to learn a sequence → affinity
+#   map, while its ligand-level term is already near-perfect. Each ligand does, however, have many
+#   observed training targets, which is exactly what the neighbour predictor exploits — and that
+#   advantage is specific to a dense-per-ligand dataset like KIBA.
 #
 # **Caveats.** Groups are similarity clusters at 0.5, so distant paralogues can still sit on both sides of
 # the split. The Smith–Waterman matrix is supplied with the data and uses sequences only (no labels), so
