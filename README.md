@@ -1,10 +1,113 @@
-# SC4020 Project 2 — Drug–Target Binding Affinity
+<h1 align="center">Drug–Target Binding Affinity on KIBA</h1>
 
-| Task | Scope | Status |
-|---|---|---|
-| **1 — Dataset analysis** | **KIBA** | ✅ complete ([below](#task-1--analysis-of-the-kiba-dataset)) |
-| **2 — Collaborative filtering recommender** | **KIBA** | ✅ complete ([below](#task-2--collaborative-filtering-on-kiba)) |
-| **3 — Cold-target generalisation** | **KIBA** | ✅ complete ([below](#task-3--cold-target-generalisation-on-kiba)) |
+<p align="center">
+  <em>Cleaning a sparse kinase-inhibitor benchmark, recommending targets for a drug,<br>
+  and predicting affinity for kinases the model has never seen.</em>
+</p>
+
+<p align="center">
+  <strong>SC4020 Data Analytics &amp; Mining · Project 2 · Group 57</strong><br>
+  <sub>2,068 ligands × 229 kinases · 117,657 measured pairs · 75.2 % of the matrix missing</sub>
+</p>
+
+---
+
+Every number, table and figure on this page is produced by the notebooks in [`notebooks/`](notebooks/) — nothing is hand-copied. The three tasks build on each other:
+
+> **Task 1** cleans the data and finds the structure in it → **Task 2** exploits that structure to recommend targets for a known drug → **Task 3** asks what survives when the kinase is one the model has never seen.
+
+**Scope.** This repository covers **KIBA**. The DAVIS half of the project lives in the group's separate `Drug_Recommendation` repository.
+
+### Jump to
+
+[Task 1 — Dataset analysis](#task-1--analysis-of-the-kiba-dataset) · [Task 2 — Collaborative filtering](#task-2--collaborative-filtering-on-kiba) · [Task 3 — Cold-target generalisation](#task-3--cold-target-generalisation-on-kiba) · [Reproduce](#reproduce) · [Repository structure](#repository-structure)
+
+---
+
+## Results at a glance
+
+| | Task 1 — Analysis | Task 2 — Recommender | Task 3 — Cold targets |
+|---|---|---|---|
+| **Question** | What is in the data, and what is wrong with it? | For a known drug, which untested kinase binds best? | For a kinase never seen in training, can we predict anything? |
+| **Headline** | 43 stereoisomer IDs merged; **22.9 %** of scores heaped at 11.1 / 11.2 | Matrix factorisation **MSE 0.201**, **CI 0.856**, **Hit@5 0.892** | Similarity-neighbour **MSE 0.388**, **within-ligand CI 0.601** |
+| **Beats baseline?** | — | Yes, on every metric (bias baseline: 0.377 / 0.781 / 0.672) | Yes, on **5 of 5** cold splits (ligand mean: 0.433 / 0.500) |
+| **The catch** | Missing ≠ non-binding; 75.2 % of the matrix is simply untested | Ligand-based CF falls back to the baseline on 25.6 % of pairs for lightly tested drugs | Gains concentrate where a *related* kinase was in training |
+
+**The thread running through all three.** The ligand mean — each drug's average score — is a deceptively strong baseline on squared error, and completely useless at ranking. It scores **CI = 0.500 within a ligand in both Task 2 and Task 3**, because it hands every candidate target the same number. Judging models on MSE alone would hide that; every model here is therefore reported on both error *and* ranking.
+
+---
+
+## Every figure in this repository
+
+<table>
+<tr>
+<td width="33%"><a href="figures/kiba/task1/fig1_heatmap.png"><img src="figures/kiba/task1/fig1_heatmap.png" width="100%"></a><sub><b>T1 · Fig 1</b> — Ligand–target heatmap, missing entries distinguished</sub></td>
+<td width="33%"><a href="figures/kiba/task1/fig2_score_distribution.png"><img src="figures/kiba/task1/fig2_score_distribution.png" width="100%"></a><sub><b>T1 · Fig 2</b> — Score distribution (KDE), with the discrete spikes</sub></td>
+<td width="33%"><a href="figures/kiba/task1/fig3_coverage.png"><img src="figures/kiba/task1/fig3_coverage.png" width="100%"></a><sub><b>T1 · Fig 3</b> — How many measurements each ligand and target has</sub></td>
+</tr>
+<tr>
+<td><a href="figures/kiba/task1/fig4_missingness_vs_score.png"><img src="figures/kiba/task1/fig4_missingness_vs_score.png" width="100%"></a><sub><b>T1 · Fig 4</b> — Missing ≠ non-binding</sub></td>
+<td><a href="figures/kiba/task1/fig5_abnormal_ligand.png"><img src="figures/kiba/task1/fig5_abnormal_ligand.png" width="100%"></a><sub><b>T1 · Fig 5</b> — The abnormal ligand CHEMBL373751</sub></td>
+<td><a href="figures/kiba/task1/fig6_stereoisomers.png"><img src="figures/kiba/task1/fig6_stereoisomers.png" width="100%"></a><sub><b>T1 · Fig 6</b> — Stereoisomer consistency</sub></td>
+</tr>
+<tr>
+<td><a href="figures/kiba/task1/fig7_target_properties.png"><img src="figures/kiba/task1/fig7_target_properties.png" width="100%"></a><sub><b>T1 · Fig 7</b> — Target properties and the 55 kinase families</sub></td>
+<td><a href="figures/kiba/task1/fig8_similarity_vs_profile.png"><img src="figures/kiba/task1/fig8_similarity_vs_profile.png" width="100%"></a><sub><b>T1 · Fig 8</b> — Do similar molecules / proteins bind alike?</sub></td>
+<td><a href="figures/kiba/task2/task2_cf_k_sensitivity.png"><img src="figures/kiba/task2/task2_cf_k_sensitivity.png" width="100%"></a><sub><b>T2</b> — kNN neighbourhood-size sensitivity</sub></td>
+</tr>
+<tr>
+<td><a href="figures/kiba/task2/task2_e2_groups.png"><img src="figures/kiba/task2/task2_e2_groups.png" width="100%"></a><sub><b>T2 · E2</b> — Target communities and degree</sub></td>
+<td><a href="figures/kiba/task2/task2_e3_sparsity.png"><img src="figures/kiba/task2/task2_e3_sparsity.png" width="100%"></a><sub><b>T2 · E3</b> — Per-ligand sparsity and neighbour availability</sub></td>
+<td><a href="figures/kiba/task2/task2_mf_factors.png"><img src="figures/kiba/task2/task2_mf_factors.png" width="100%"></a><sub><b>T2</b> — Matrix-factorisation target factors</sub></td>
+</tr>
+<tr>
+<td><a href="figures/kiba/task3/fig1_test_mse_by_seed.png"><img src="figures/kiba/task3/fig1_test_mse_by_seed.png" width="100%"></a><sub><b>T3 · Fig 1</b> — Cold-target test MSE across 5 group splits</sub></td>
+<td><a href="figures/kiba/task3/fig2_error_vs_similarity.png"><img src="figures/kiba/task3/fig2_error_vs_similarity.png" width="100%"></a><sub><b>T3 · Fig 2</b> — Error vs similarity to the nearest training kinase</sub></td>
+<td></td>
+</tr>
+</table>
+
+<sub>Click any figure to open it full size. Each one is discussed in its task section below.</sub>
+
+---
+
+## Quick start
+
+```bash
+git clone https://github.com/itzameenz/4020-project2.git && cd 4020-project2
+python -m venv .venv
+# Windows: .venv\Scripts\activate   |   macOS/Linux: source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+Then run the notebooks in order — see [Reproduce](#reproduce) for the exact commands and timings.
+
+---
+
+## What is where
+
+```
+data/
+  kiba/                        original KIBA files from DeepDTA (never modified)
+  processed/                   cleaned tables (Task 1) + cached ESM embeddings (Task 3)
+  splits/                      the fixed 70/15/15 pair split (Task 2)
+notebooks/
+  task1_kiba.ipynb             analysis and cleaning
+  task2_kiba_split.ipynb       the split
+  task2_kiba_cf.ipynb          collaborative filtering + case study
+  task3_kiba.py  /  .ipynb     cold-target generalisation (edit the .py, it generates the .ipynb)
+saved_models/                  4 CF checkpoints, reload verified against in-memory predictions
+figures/kiba/task1 task2 task3     14 figures
+results/kiba/task1 task2 task3     29 result tables (CSV; Task 1 and 3 also as Markdown)
+```
+
+| Want to… | Go to |
+|---|---|
+| See the cleaning decisions | [`results/kiba/task1/table_cleaning_log.md`](results/kiba/task1/table_cleaning_log.md) |
+| Check the split is leak-free | [`results/kiba/task2/task2_split_counts.csv`](results/kiba/task2/task2_split_counts.csv) |
+| Compare every CF model | [`results/kiba/task2/task2_e1_results.csv`](results/kiba/task2/task2_e1_results.csv) |
+| Compare every cold-target model | [`results/kiba/task3/summary.md`](results/kiba/task3/summary.md) |
+| Read the Task 3 notes written for the group | [`results/kiba/task3/notes_for_group.pdf`](results/kiba/task3/notes_for_group.pdf) |
 
 ---
 
