@@ -2,7 +2,8 @@
 
 | Task | Scope | Status |
 |---|---|---|
-| **1 — Dataset analysis** | **KIBA** | ✅ complete (this page) |
+| **1 — Dataset analysis** | **KIBA** | ✅ complete ([below](#task-1--analysis-of-the-kiba-dataset)) |
+| **2 — Collaborative filtering recommender** | **KIBA** | ✅ complete ([below](#task-2--collaborative-filtering-on-kiba)) |
 | **3 — Cold-target generalisation** | **KIBA** | ✅ complete ([below](#task-3--cold-target-generalisation-on-kiba)) |
 
 ---
@@ -252,6 +253,147 @@ A two-way additive decomposition (score ≈ overall mean + ligand effect + targe
 
 ---
 
+# Task 2 — Collaborative filtering on KIBA
+
+**Notebooks:** [`notebooks/task2_kiba_split.ipynb`](notebooks/task2_kiba_split.ipynb) · [`notebooks/task2_kiba_cf.ipynb`](notebooks/task2_kiba_cf.ipynb) · **Checkpoints:** [`saved_models/`](saved_models/) · **Figures:** [`figures/kiba/`](figures/kiba/) · **Tables:** [`results/kiba/`](results/kiba/) · **Split:** [`data/splits/kiba_split.csv`](data/splits/kiba_split.csv)
+
+### Key findings at a glance
+
+- **Every CF model beats the additive bias baseline:** Matrix factorisation cuts test MSE from **0.377** (bias baseline $\mu + b_x + b_i$) to **0.201**, raises global CI from **0.781 to 0.856**, and lifts Hit@5 from **0.672 to 0.892** (NDCG@5 **0.744 → 0.880**).
+- **Ligand-based CF beats Target-based CF on KIBA (MSE 0.225 vs 0.251, Hit@1 0.570 vs 0.462), reversing DAVIS:** KIBA has no near-duplicate mutant/phosphorylated sibling targets to give item-kNN a shortcut, and has $30\times$ more ligands (2,068 vs 68) from which user-kNN can pull co-screened chemical analogues.
+- **Sparsity flips the kNN winner for lightly tested ligands (E3):** for ligands with $\le 10$ training pairs, Ligand-based CF falls back to the bias baseline on **25.6 %** of test pairs and loses to Target-based CF (MSE **0.625 vs 0.601**). Above 10 training pairs, Ligand-based CF's fallback drops below 7.4 % and it wins in every denser bin.
+- **Not an artefact of the 11.1 / 11.2 spike (E4):** on non-spike pairs alone ($n = 13{,}611$), MF cuts MSE from **0.444 to 0.240**; on strong binders ($\ge 12.1$, $n = 3{,}735$), MF nearly halves MSE from **1.097 to 0.576**.
+- **Abnormal ligand trade-off (E4):** on the 8 test pairs flagged as far-low or belonging to CHEMBL373751 ($b_x = -8.76$), shrinkage-stabilised kNN stays close to $b_{xi}$ (MSE **13.30–13.45** vs **14.29** for bias), whereas unclipped MF over-extrapolates (**19.27**).
+- **Case study from `saved_models/kiba_cf.npz`:** the reloaded model ranks the true best test target **1st** (`Hit@1 = True`) for all three brief-specified ligands (`CHEMBL1967538`, `CHEMBL2004544`, `CHEMBL565612`), including placing `CHEMBL565612`'s extreme-high target `Q05655` (score **14.99**) **1st of 23** where the bias baseline ranks it **20th**.
+
+---
+
+## 1. Framing and data split
+
+- **User = ligand** (2,068 deduplicated ligands, `lig_id` $0\ldots 2067$)
+- **Item = target** (229 UniProt kinases, `tgt_id` $0\ldots 228$)
+- **Rating = KIBA score** (higher = stronger binding; missing = never tested, kept as `NaN`)
+
+The 117,657 cleaned pairs are split **70 % / 15 % / 15 %** (`SEED = 42`), stratified by `flag_spike` (whether the score sits at the heaped 11.1 / 11.2 values) so every partition has the same 22.9 % spike share. All 2,068 ligands and 229 targets already have $\ge 4$ training pairs (median 22, mean 39.8, max 123), so **0 pairs needed moving** to satisfy the warm-start coverage rule, and no `(lig_id, tgt_id)` pair appears in more than one partition.
+
+| Partition | Pairs | Share | Ligands | Targets | Share spike (11.1 / 11.2) | Mean score | Pairs moved for coverage |
+|:--|--:|--:|--:|--:|--:|--:|--:|
+| `train` | 82,359 | 70.0 % | 2,068 | 229 | 22.9 % | 11.722 | — |
+| `val` | 17,649 | 15.0 % | 1,971 | 228 | 22.9 % | 11.719 | — |
+| `test` | 17,649 | 15.0 % | 1,953 | 226 | 22.9 % | 11.721 | — |
+| **total** | **117,657** | **100.0 %** | **2,068** | **229** | **22.9 %** | **11.721** | **0** |
+
+---
+
+## 2. Models and hyperparameter tuning
+
+All models build on the additive bias baseline fitted on `R_train` ($2{,}068 \times 229$, 17.4 % observed):
+
+$$b_{xi} = \mu + b_x + b_i, \qquad b_x = \bar r_{x\cdot} - \mu, \qquad b_i = \bar r_{\cdot i} - \mu$$
+
+1. **Neighbourhood CF (`user_knn` = Ligand-based, `item_knn` = Target-based):**
+   $$\hat r_{xi} = b_{xi} + \frac{\sum_{j \in N(i;x)} s_{ij}\,(r_{xj} - b_{xj})}{\sum_{j \in N(i;x)} |s_{ij}|}, \qquad s'_{ij} = \mathbb{1}[n_{ij} \ge m]\,\frac{n_{ij}}{n_{ij} + \lambda}\,s_{ij}$$
+   tuned over the 960-setting grid $k \in \{3, 5, 6, 8, 10, 20, 40, 80\} \times \lambda \in \{0, 10, 25, 50, 100\} \times m \in \{2, 5, 10\} \times \text{sim} \in \{\text{Pearson}, \text{centred cosine}\} \times \text{keep\_negative} \in \{\text{False}, \text{True}\}$.
+2. **Matrix factorisation (Weighted-$\lambda$ ALS):**
+   $$\hat r_{xi} = \mu + b_x + b_i + p_x^\top q_i$$
+   fitted by alternating least squares with per-entity penalty $\lambda \cdot n_x$ (Zhou et al., 2008) and early stopping on validation MSE (patience 5 sweeps), tuned over $\text{rank} \in \{2, 4, 8, 16, 32, 48, 64\} \times \lambda \in \{0.001, 0.01, 0.025, 0.05, 0.1, 0.5, 1.0\}$ (49 settings).
+
+**Co-rated support on `R_train`:** across all 2.14M ligand pairs, **15.1 %** share zero training targets, **71.2 %** share $\ge 2$, and only **25.4 %** share $\ge 10$ (median positive overlap: **5** targets). Across all 26,106 target pairs, **9.3 %** share zero training ligands and **56.3 %** share $\ge 10$ (median positive overlap: **33** ligands).
+
+**Chosen settings** (selected by lowest validation MSE, with ties within 0.005 broken by validation CI):
+
+| Model | `sim` | `shrink` ($\lambda$) | `min_common` ($m$) | `keep_negative` | $k$ | `rank` | `lam` | `sweeps` | Val MSE | Val CI |
+|:--|:--|--:|--:|:--|--:|--:|--:|--:|--:|--:|
+| **Ligand-based CF** | `pearson` | 50 | 2 | `False` | 8 | — | — | — | 0.2215 | 0.8482 |
+| **Target-based CF** | `pearson` | 25 | 10 | `False` | 5 | — | — | — | 0.2541 | 0.8252 |
+| **Matrix factorisation** | — | — | — | — | — | 64 | 0.025 | 41 | **0.1912** | **0.8565** |
+
+![KIBA kNN sensitivity](figures/kiba/task2/task2_cf_k_sensitivity.png)
+
+---
+
+## 3. Main test evaluation (E1) and model persistence
+
+- **Concordance Index (CI):** computed with the brief's formula $\text{CI} = (\tau_b \sqrt{B/A} + 1)/2$, where $A$ and $B$ are the numbers of pair comparisons untied in true and predicted scores.
+- **Per-ligand ranking metrics:** evaluated over the 1,492 test ligands that have $\ge 2$ held-out test targets and non-constant true scores (1,070 qualify for Hit@5 with $\ge 5$ test targets; median 10 candidates per ligand). `NDCG@5` uses $\max(\text{score} - 11.2, 0)$ as the gain so heaped spike pairs add zero gain.
+
+| Model | MSE train | MSE val | MSE test | RMSE test | CI test | CI / ligand | Hit@1 | Hit@5 | MRR | NDCG@5 | Mean rank of best | Fallback % | MSE non-spike | CI non-spike |
+|:--|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| **Global mean** | 0.6913 | 0.7075 | 0.7073 | 0.8410 | 0.5000 | 0.5000 | 0.1957 | 0.4607 | 0.3883 | 0.5709 | 5.85 | — | 0.8211 | 0.5000 |
+| **Ligand mean** | 0.3992 | 0.4384 | 0.4325 | 0.6576 | 0.7036 | 0.5000 | 0.1957 | 0.4607 | 0.3883 | 0.5709 | 5.85 | — | 0.4825 | 0.7014 |
+| **Target mean** | 0.5932 | 0.6155 | 0.6072 | 0.7792 | 0.6871 | 0.6721 | 0.3298 | 0.6720 | 0.5215 | 0.7439 | 3.97 | — | 0.7379 | 0.6329 |
+| **Bias baseline** | 0.3466 | 0.3850 | 0.3765 | 0.6136 | 0.7806 | 0.6721 | 0.3298 | 0.6720 | 0.5215 | 0.7439 | 3.97 | — | 0.4439 | 0.7472 |
+| **Random ranking** | — | — | — | — | — | 0.4994 | 0.1868 | 0.4717 | 0.3851 | 0.5705 | 5.84 | — | — | — |
+| **Target-based CF** | 0.2266 | 0.2541 | 0.2515 | 0.5015 | 0.8269 | 0.7345 | 0.4618 | 0.8374 | 0.6418 | 0.8365 | 2.79 | 0.21 % | 0.2973 | 0.8042 |
+| **Ligand-based CF** | 0.1246 | 0.2215 | 0.2246 | 0.4739 | 0.8473 | **0.7981** | **0.5697** | 0.8813 | **0.7210** | 0.8742 | 2.38 | 2.39 % | 0.2678 | 0.8252 |
+| **Matrix factorisation** | **0.0349** | **0.1912** | **0.2007** | **0.4479** | **0.8562** | 0.7920 | 0.5523 | **0.8916** | 0.7129 | **0.8801** | **2.29** | — | **0.2400** | **0.8337** |
+
+**Saved checkpoints (`saved_models/`):** Matrix factorisation has the lowest validation MSE (0.1912) and is saved as `saved_models/kiba_cf.npz` (`1.2 MB`, plus `kiba_user_knn.npz`, `kiba_item_knn.npz`, and `kiba_mf.npz`). Each archive stores the learned parameters, matrix indices, CHEMBL/UniProt labels, `score_scale`, `seed`, and `split_file`, and is verified with `np.load(..., allow_pickle=False)` and `assert np.allclose(pred_before, pred_after)`.
+
+---
+
+## 4. Extended analyses (E2, E3, E4 & MF factors)
+
+### E2 — Target communities and target degree
+
+Louvain community detection is run on the **training pairs only** (bipartite graph of strong training pairs $\ge 12.1$, weighted by score), finding 7 communities with $\ge 10$ targets (modularity 0.339) plus 3 targets with no strong training ligand (`other`, 10 test pairs). Ligand-based CF beats Target-based CF in 6 of the 7 communities (`C0–C4, C6`); Target-based CF wins in `C5` (0.150 vs 0.171), a tight kinase family cluster. Across all communities and degree bins, MF achieves the lowest test MSE.
+
+![E2 target groups](figures/kiba/task2/task2_e2_groups.png)
+
+### E3 — Per-ligand sparsity and neighbour availability
+
+Test pairs are binned by how many training pairs their ligand has. For the sparsest ligands ($\le 10$ training pairs), Ligand-based CF has no usable neighbour on **25.6 %** of test pairs and loses to Target-based CF (**0.625 vs 0.601**). Once a ligand has $> 10$ training pairs, Ligand-based CF's fallback drops to 7.4 % (`11–20`), 1.9 % (`21–40`), and 0.0 % (`> 80`), and it beats Target-based CF in every denser bin.
+
+| Ligand train pairs | Pairs | Share $\ge 12.1$ | Bias baseline | Ligand-based CF | Target-based CF | MF | Fallback % (Ligand CF) | Median usable nbrs (Ligand CF) | Fallback % (Target CF) | Median usable nbrs (Target CF) |
+|:--|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| `<=10` | 1,191 | 34.8 % | 0.824 | 0.625 | 0.601 | **0.527** | 25.61 % | 76 | 0.67 % | 7 |
+| `11-20` | 1,246 | 26.8 % | 0.691 | 0.499 | 0.541 | **0.434** | 7.38 % | 182 | 1.44 % | 13 |
+| `21-40` | 1,190 | 17.1 % | 0.358 | 0.218 | 0.258 | **0.196** | 1.93 % | 315 | 0.42 % | 30 |
+| `41-80` | 4,697 | 18.6 % | 0.316 | 0.181 | 0.209 | **0.166** | 0.02 % | 400 | 0.04 % | 50 |
+| `>80` | 9,325 | 20.5 % | 0.311 | 0.160 | 0.188 | **0.146** | 0.00 % | 431 | 0.04 % | 85 |
+
+![E3 per-ligand sparsity](figures/kiba/task2/task2_e3_sparsity.png)
+
+### E4 — Heaped spike values (`11.1 / 11.2`) and abnormal records
+
+Spike-vs-spike pairs make up only **5.2 %** of all test sample pairs (vs 48.5 % floor-vs-floor ties on DAVIS). A constant `11.15` predictor wins on spike pairs (MSE 0.0025) but fails overall (MSE 1.034) and on strong binders (3.909). On the 8 test pairs flagged as `flag_far_low` or belonging to the abnormal ligand `CHEMBL373751` (5 training pairs, mean 2.96, $b_x = -8.76$), kNN stays close to $b_{xi}$ (MSE 13.30–13.45 vs 14.29 for bias), whereas MF over-extrapolates (`MSE 19.27`) because `CHEMBL373751`'s training scores span `0.0` to `9.0`.
+
+| Model | MSE all ($17{,}649$) | MSE spike ($4{,}038$) | MSE non-spike ($13{,}611$) | MSE strong $\ge 12.1$ ($3{,}735$) | MSE far-low / abnormal ($8$) | CI non-spike |
+|:--|--:|--:|--:|--:|--:|--:|
+| **Ligand mean** | 0.4325 | 0.2640 | 0.4825 | 1.2892 | 13.9401 | 0.7014 |
+| **Bias baseline** | 0.3765 | 0.1496 | 0.4439 | 1.0972 | 14.2859 | 0.7472 |
+| **Target-based CF** | 0.2515 | 0.0968 | 0.2973 | 0.6625 | **13.2995** | 0.8042 |
+| **Ligand-based CF** | 0.2246 | 0.0789 | 0.2678 | 0.6067 | 13.4543 | 0.8252 |
+| **Matrix factorisation** | **0.2007** | 0.0679 | **0.2400** | **0.5762** | 19.2689 | **0.8337** |
+| **Constant 11.15** | 1.0338 | **0.0025** | 1.3398 | 3.9094 | 44.4781 | 0.5000 |
+
+### MF target factors
+
+PCA projection of the rank-64 target factors $q_i$, coloured by the train-only Louvain communities from E2 (mean Euclidean distance within the same community: **1.763** vs **1.853** between communities):
+
+![MF target factors](figures/kiba/task2/task2_mf_factors.png)
+
+---
+
+## 5. Case study (loaded from `saved_models/kiba_cf.npz`)
+
+The three test ligands suggested in the brief span KIBA's coverage and activity spectrum:
+
+| Ligand | `lig_id` | Train pairs | Test candidates | Test share spike | Test $\ge 12.1$ | Max test score | Model | Ligand MSE | Ligand CI | Rank of true best | Hit@1 | Hit@5 | NDCG@5 |
+|:--|--:|--:|--:|--:|--:|--:|:--|--:|--:|--:|:--:|:--:|--:|
+| **CHEMBL1967538** | 884 | 25 | 3 | 0.0 % | 0 | 10.700 | **CF (`kiba_cf.npz`)** | **0.049** | **1.000** | **1** (`Q13627`) | **True** | — | — |
+| | | | | | | | Bias baseline | 0.148 | 0.667 | 2 (`Q13627`) | False | — | — |
+| **CHEMBL2004544** | 537 | 65 | 23 | 30.4 % | 5 | 12.600 | **CF (`kiba_cf.npz`)** | **0.038** | **0.918** | **1** (`O00311`) | **True** | **True** | **0.956** |
+| | | | | | | | Bias baseline | 0.145 | 0.700 | 1 (`O00311`) | True | True | 0.677 |
+| **CHEMBL565612** | 640 | 123 | 23 | 21.7 % | 4 | 14.986 | **CF (`kiba_cf.npz`)** | **0.313** | **0.721** | **1** (`Q05655`) | **True** | **True** | **0.993** |
+| | | | | | | | Bias baseline | 0.806 | 0.608 | 20 (`Q05655`) | False | False | 0.265 |
+
+- **CHEMBL1967538 (sparse, weak-binding case):** 25 training pairs and 3 held-out test targets (`Q13627 = 10.7`, `P50750 = 10.3`, `P35968 = 10.2`), all below 11.2. The bias baseline ranks `P50750` 1st because of its higher global target bias; CF reverses the top two and orders all three targets perfectly (`CI = 1.000`, `Hit@1 = True`).
+- **CHEMBL2004544 (typical, moderate-coverage selective case):** both models put the true best `O00311` (`12.6`) 1st, but the bias baseline fills ranks 3–5 with globally popular non-binders (`11.3–11.6`) and pushes the second-best true binder `Q8IW41` (`12.5`) to 6th (`NDCG@5 = 0.677`). CF ranks `Q8IW41` 2nd and places four of the five strong binders in the top 5 (`NDCG@5 = 0.956`).
+- **CHEMBL565612 (dense, potent inhibitor with an extreme-high target):** its strongest test target is `Q05655` (PKC-$\delta$, score **14.986**, `flag_far_high`). Because `Q05655` is not globally promiscuous, its target bias $b_i$ is small and the bias baseline ranks it **20th of 23** (`NDCG@5 = 0.265`). CF ranks `Q05655` **1st** (predicted `13.304`), followed by the other three strong binders `Q86V86` (`12.6`), `Q9Y4K4` (`12.9`) and `Q16513` (`12.7`) at ranks 2–4 (`NDCG@5 = 0.993`).
+
+---
+
 # Task 3 — Cold-target generalisation on KIBA
 
 **Notebook:** [`notebooks/task3_kiba.ipynb`](notebooks/task3_kiba.ipynb) · **Figures:** [`figures/kiba/task3/`](figures/kiba/task3/) · **Tables:** [`results/kiba/task3/`](results/kiba/task3/) · **Notes for the group:** [`results/kiba/task3/notes_for_group.pdf`](results/kiba/task3/notes_for_group.pdf)
@@ -327,27 +469,39 @@ python -m venv .venv
 # Windows: .venv\Scripts\activate   |   macOS/Linux: source .venv/bin/activate
 pip install -r requirements.txt
 jupyter nbconvert --to notebook --execute --inplace notebooks/task1_kiba.ipynb
+jupyter nbconvert --to notebook --execute --inplace notebooks/task2_kiba_split.ipynb
+jupyter nbconvert --to notebook --execute --inplace --ExecutePreprocessor.timeout=-1 notebooks/task2_kiba_cf.ipynb
 jupyter nbconvert --to notebook --execute --inplace --ExecutePreprocessor.timeout=1800 notebooks/task3_kiba.ipynb
 ```
 
-Every number, table and figure on this page is regenerated by these two notebooks. Task 1 runs in under a minute. Task 3 takes about 13 minutes on a laptop CPU; the first run also downloads the ESM-2 model (30 MB) and caches the embeddings in `data/processed/kiba_esm2_t6_8M.npy`.
+Every number, table, figure and model checkpoint on this page is regenerated by those notebooks, in that order. Task 1 runs in under a minute. Task 3 takes about 13 minutes on a laptop CPU; its first run also downloads the ESM-2 model (30 MB) and caches the embeddings in `data/processed/kiba_esm2_t6_8M.npy`.
 
 ## Repository structure
 
 ```
 data/
-  kiba/                  original KIBA files from DeepDTA (unchanged)
-  processed/             cleaned KIBA tables + cached ESM embeddings (shared by both tasks)
+  kiba/                        original KIBA files from DeepDTA (unchanged)
+  processed/                   cleaned KIBA tables (Task 1) + cached ESM embeddings (Task 3)
+  splits/                      70/15/15 train/val/test pair split (Task 2)
 notebooks/
-  task1_kiba.ipynb       Task 1 — KIBA dataset analysis
-  task3_kiba.py          Task 3 — source (jupytext percent format; edit this one)
-  task3_kiba.ipynb       Task 3 — executed notebook, generated from task3_kiba.py
+  task1_kiba.ipynb             Task 1 — KIBA analysis and cleaning
+  task2_kiba_split.ipynb       Task 2 — KIBA train/val/test split
+  task2_kiba_cf.ipynb          Task 2 — KIBA collaborative filtering & case study
+  task3_kiba.py                Task 3 — source (jupytext percent format; edit this one)
+  task3_kiba.ipynb             Task 3 — executed notebook, generated from task3_kiba.py
+saved_models/
+  kiba_cf.npz                  best validation CF model (matrix factorisation)
+  kiba_user_knn.npz            Ligand-based kNN checkpoint
+  kiba_item_knn.npz            Target-based kNN checkpoint
+  kiba_mf.npz                  Matrix factorisation checkpoint
 figures/kiba/
-  task1/                 Task 1 figures (fig1 … fig8)
-  task3/                 Task 3 figures (fig1 test MSE by seed, fig2 error vs similarity)
+  task1/                       Task 1 figures
+  task2/                       Task 2 figures
+  task3/                       Task 3 figures
 results/kiba/
-  task1/                 Task 1 tables (CSV + Markdown)
-  task3/                 Task 3 tables (CSV + Markdown) + notes_for_group.pdf
+  task1/                       Task 1 tables (CSV + Markdown)
+  task2/                       Task 2 tables (CSV)
+  task3/                       Task 3 tables (CSV + Markdown) + notes_for_group.pdf
 ```
 
 ## References
@@ -359,3 +513,4 @@ results/kiba/
 5. Tukey, J. W. (1977). *Exploratory Data Analysis*. Addison-Wesley.
 6. Lin, Z., Akin, H., Rao, R., et al. (2023). Evolutionary-scale prediction of atomic-level protein structure with a language model. *Science*, 379(6637), 1123–1130. (ESM-2)
 7. RDKit: Open-source cheminformatics. <https://www.rdkit.org>
+8. Zhou, Y., Wilkinson, D., Schreiber, R., & Pan, R. (2008). Large-scale parallel collaborative filtering for the Netflix Prize. *Proc. AAIM*, LNCS 5034, 337–348.

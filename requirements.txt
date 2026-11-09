@@ -10,3 +10,4 @@ rdkit==2026.9.1
 scikit-learn==1.9.1
 torch==2.15.0+cpu
 transformers==5.22.1
+networkx==3.7

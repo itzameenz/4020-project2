@@ -1,0 +1,5 @@
+,pairs,share of pairs,ligands,targets,share spike (11.1 / 11.2),mean score,pairs moved for coverage
+train,82359,70.0%,2068,229,22.9%,11.722,
+val,17649,15.0%,1971,228,22.9%,11.719,
+test,17649,15.0%,1953,226,22.9%,11.721,
+total,117657,100.0%,2068,229,22.9%,11.721,0
